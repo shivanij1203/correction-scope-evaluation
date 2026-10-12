@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from typing import Iterable
-from .scope import Correction, Order, Decision, evaluate
+from .scope import Correction, Order, Decision
 
 
 class Authority(str, Enum):
@@ -73,8 +73,14 @@ def resolve(records: Iterable[CorrectionRecord], order: Order, policies: Iterabl
     for r in applicable:
         if r.supersedes:
             previous = by_id.get(r.supersedes)
-            if previous is None or previous.correction.recorded_on > r.correction.recorded_on:
-                return Resolution(Decision.REVIEW, None, (), ids, ('invalid supersession chain',), policy.source_id)
+            if (previous is None
+                    or previous.correction.recorded_on >= r.correction.recorded_on
+                    or r.authority != Authority.CUSTOMER_DIRECTIVE
+                    or not r.approved_by
+                    or not r.correction.approved_as_preference
+                    or r.correction.reason != 'customer_preference'):
+                return Resolution(Decision.REVIEW, None, (), ids,
+                                  ('unverified or invalid supersession',), policy.source_id)
             superseded.add(r.supersedes)
     active = [r for r in applicable if r.correction.id not in superseded]
 
@@ -92,14 +98,14 @@ def resolve(records: Iterable[CorrectionRecord], order: Order, policies: Iterabl
                           ('no approved reusable directive',) if active else ('no applicable corrections',), policy.source_id)
     # A newer timestamp alone does not revoke an earlier directive.
     # Explicit supersession is required to remove the older authority.
-    latest = candidates
-    skus = {r.correction.substitute_sku for r in latest}
+    approved_directives = candidates
+    skus = {r.correction.substitute_sku for r in approved_directives}
     if len(skus) != 1:
         return Resolution(Decision.REVIEW, None, (), ids, ('conflicting customer directives',), policy.source_id)
-    chosen = latest[0].correction.substitute_sku
+    chosen = approved_directives[0].correction.substitute_sku
     if chosen not in policy.permitted_substitutes:
         return Resolution(Decision.REVIEW, None, (), ids, ('substitute disallowed by effective policy',), policy.source_id)
     if not order.substitute_available:
         return Resolution(Decision.REVIEW, None, (), ids, ('substitute currently unavailable',), policy.source_id)
-    return Resolution(Decision.REUSE, chosen, tuple(r.correction.id for r in latest), ids,
+    return Resolution(Decision.REUSE, chosen, tuple(r.correction.id for r in approved_directives), ids,
                       ('approved directive applies under effective policy',), policy.source_id)

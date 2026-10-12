@@ -61,6 +61,56 @@ def challenge_cases():
     ]
     return tuple(Case(*spec) for spec in specs)
 
+def combined_challenges():
+    """Composed cases kept separate from the original 24 specification examples.
+
+    These are still synthetic author-labeled examples, not an independent holdout.
+    """
+    base = challenge_cases()
+    approved = base[0]
+    conflicting = base[11]
+    changed = base[14]
+    unavailable = base[18]
+    cases = (
+        Case("conflict plus unavailable substitute", conflicting.records,
+             replace(conflicting.order, substitute_available=False),
+             conflicting.policies, Decision.REVIEW,
+             "Conflicting directives and no available substitute"),
+        Case("policy revision plus unavailable substitute", changed.records,
+             replace(changed.order, substitute_available=False),
+             changed.policies, Decision.REVIEW,
+             "Old directive cannot survive contract revision"),
+        Case("approved directive but different customer and stale snapshot",
+             approved.records, replace(approved.order, customer="gamma", policy_version=2),
+             approved.policies, Decision.REVIEW,
+             "Stale governing policy must be resolved before reuse"),
+        Case("approved directive but future dated policy only",
+             approved.records, approved.order,
+             (replace(POLICY, effective_from=date(2026, 11, 1)),),
+             Decision.REVIEW, "No effective contract"),
+        Case("approved directive plus irrelevant sales observation",
+             approved.records + (record(replace(BASE, id="obs-77", customer="beta"),
+                                         authority=Authority.OBSERVATION),),
+             approved.order, approved.policies, Decision.REUSE,
+             "Unrelated observation must not defeat valid directive"),
+        Case("conflicting directives plus new contract",
+             conflicting.records, replace(conflicting.order, policy_version=4),
+             (POLICY, Policy(4, date(2026, 10, 1),
+                             frozenset({"PLY-ALT", "PLY-B"}), "contract-v4")),
+             Decision.REVIEW, "Contract change cannot silently settle conflict"),
+        Case("one-time substitution plus expired contract",
+             base[10].records, base[10].order,
+             (replace(POLICY, effective_from=date(2026, 11, 1)),),
+             Decision.REVIEW, "Missing effective contract blocks reuse"),
+        Case("valid directive with unrelated future policy",
+             approved.records, approved.order,
+             (POLICY, Policy(4, date(2026, 11, 1),
+                             frozenset(), "future-contract")),
+             Decision.REUSE, "Future contract does not retroactively change decision"),
+    )
+    return cases
+
+
 def naive_last_correction(case):
     """Baseline: reuse the latest correction with matching requested SKU."""
     candidates = [r for r in case.records if r.correction.requested_sku == case.order.requested_sku
@@ -73,6 +123,28 @@ def naive_latest_approved(case):
                   and r.correction.requested_sku == case.order.requested_sku
                   and r.correction.recorded_on <= case.order.on_date]
     return Decision.REUSE if candidates else Decision.REVIEW
+
+def scoped_baseline(case):
+    """A practical context-aware baseline without authority or contract precedence.
+
+    Checks customer, branch, SKU, effective dates, and availability, but treats
+    any matching historical substitution as a reusable preference.
+    """
+    candidates = [
+        r for r in case.records
+        if r.correction.customer == case.order.customer
+        and r.correction.branch == case.order.branch
+        and r.correction.requested_sku == case.order.requested_sku
+        and r.correction.recorded_on <= case.order.on_date
+        and (r.correction.valid_until is None
+             or case.order.on_date <= r.correction.valid_until)
+    ]
+    if not candidates:
+        return Decision.IGNORE
+    if not case.order.substitute_available:
+        return Decision.REVIEW
+    return Decision.REUSE
+
 
 def scoped(case):
     return resolve(case.records, case.order, case.policies).decision
@@ -93,6 +165,18 @@ def report():
     cases = challenge_cases()
     for name, policy in (("latest correction", naive_last_correction),
                          ("latest approved", naive_latest_approved),
+                         ("context baseline", scoped_baseline),
+                         ("scope evaluator", scoped)):
+        result = metrics(cases, policy)
+        print(f"{name:20} correct={result['correct']:2}/{result['total']} "
+              f"unsafe_reuse={result['unsafe_reuse']:2} "
+              f"unnecessary_review={result['unnecessary_review']:2} "
+              f"missed_reuse={result['missed_reuse']:2}")
+
+def challenge_report():
+    print("\nComposed challenge cases (synthetic, author-labeled)")
+    cases = combined_challenges()
+    for name, policy in (("context baseline", scoped_baseline),
                          ("scope evaluator", scoped)):
         result = metrics(cases, policy)
         print(f"{name:20} correct={result['correct']:2}/{result['total']} "
@@ -102,3 +186,5 @@ def report():
 
 if __name__ == "__main__":
     report()
+    challenge_report()
+

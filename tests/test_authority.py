@@ -73,3 +73,12 @@ def test_newer_directive_without_supersession_does_not_win_by_timestamp():
     result = resolve([rec(), rec(newer)], ORDER, [POLICY])
     assert result.decision == Decision.REVIEW
     assert 'conflicting customer directives' in result.reasons
+
+
+def test_unapproved_observation_cannot_revoke_customer_directive():
+    later = replace(PREF, id='observation-99', substitute_sku='PLY-B',
+                    recorded_on=date(2026, 10, 2), approved_as_preference=False)
+    result = resolve([rec(), rec(later, authority=Authority.OBSERVATION,
+                                 approved=None, supersedes='corr-18')], ORDER, [POLICY])
+    assert result.decision == Decision.REVIEW
+    assert 'unverified or invalid supersession' in result.reasons
